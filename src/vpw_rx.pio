@@ -1,0 +1,54 @@
+;
+; obdito - SAE J1850 VPW pulse-width capture
+;
+; VPW encodes bits in the *duration* of alternating bus levels, so this
+; program just measures how long each level lasts and hands the result to the
+; CPU, which does the decoding.
+;
+; Input:   one pin (IN base == JMP pin). 1 = bus active (~7 V), 0 = passive.
+; Clock:   2 MHz. Each counting loop is 2 instructions, so 1 count = 1 us.
+; Setup:   the CPU preloads Y = timeout (in counts) and OSR = 0xFFFFFFFF
+;          before enabling the state machine (see vpw_rx.cpp).
+;
+; Output (one RX FIFO word per level period):
+;   bit 31     level that just ended (1 = active, 0 = passive)
+;   bits 30:0  X left over from the down-counter
+;              duration ~= timeout - X
+;              X == 0x7FFFFFFF means the period hit the timeout
+;              (passive: bus idle / EOF, active: stuck bus / BREAK)
+;
+
+.program vpw_rx
+
+idle:
+    wait 1 pin 0            ; sync on the next rising edge (start of an active period)
+
+active:
+    mov x, y                ; X = timeout
+active_loop:
+    jmp pin active_still    ; still active?
+    in osr, 1               ; went passive: tag = 1 (active period ended)
+    in x, 31
+    push block
+    jmp passive
+active_still:
+    jmp x-- active_loop     ; count 1 us and keep going
+    in osr, 1               ; timed out while active (BREAK or stuck bus)
+    in x, 31
+    push block
+    wait 0 pin 0            ; wait for the bus to release, then time the passive period
+
+passive:
+    mov x, y
+passive_loop:
+    jmp pin passive_end     ; went active?
+    jmp x-- passive_loop    ; count 1 us and keep going
+    in null, 1              ; timed out while passive: bus idle
+    in x, 31
+    push block
+    jmp idle
+passive_end:
+    in null, 1              ; tag = 0 (passive period ended)
+    in x, 31
+    push block
+    jmp active
